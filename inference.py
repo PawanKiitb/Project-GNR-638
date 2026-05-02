@@ -559,6 +559,21 @@ Thought Process: [Write your step-by-step reasoning, calculations, and tensor tr
 <answer>1</answer>
 """
 
+def resolve_image_path(test_dir, img_filename):
+    """
+    Robustly resolve image path handling two known ambiguities:
+    1. Folder name: README says 'image/' but folder structure shows 'images/'
+    2. Extension: image_name in test.csv may or may not include '.png'
+    """
+    for folder in ['images', 'image']:
+        for fname in [img_filename, img_filename + '.png']:
+            candidate = os.path.join(test_dir, folder, fname)
+            if os.path.exists(candidate):
+                return candidate
+    # Fallback: return the original guess so the error message is meaningful
+    return os.path.join(test_dir, 'images', img_filename)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--test_dir', type=str, required=True, help="Absolute path to test directory")
@@ -576,8 +591,8 @@ def main():
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        device_map="cuda",          
-        low_cpu_mem_usage=True      
+        device_map="cuda",
+        low_cpu_mem_usage=True
     ).eval()
 
     results = []
@@ -585,11 +600,11 @@ def main():
 
     # 3. Inference Loop
     for index, row in df.iterrows():
-        # Get the exact filename
         img_filename = row['image_name']
-        
-        # CHANGED: 'image' instead of 'images' based on your provided instructions
-        img_path = os.path.join(args.test_dir, 'image', img_filename)
+
+        # FIX: Robustly resolve path for both 'image/' and 'images/' folders,
+        # and with or without '.png' extension in the image_name column
+        img_path = resolve_image_path(args.test_dir, img_filename)
 
         messages = [
             {
@@ -613,9 +628,10 @@ def main():
             return_tensors="pt",
         ).to(model.device)
 
-        # Generate
+        # FIX: Removed temperature=0.2 — it has no effect when do_sample=False
+        # and causes warnings/errors in newer transformers versions
         with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=768, temperature=0.2, do_sample=False)
+            generated_ids = model.generate(**inputs, max_new_tokens=768, do_sample=False)
 
         generated_ids_trimmed = [
             out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -626,7 +642,7 @@ def main():
         )[0]
         
         # 4. Extract Answer using Regex
-        ans = 5 # Default fallback
+        ans = 5  # Default fallback
         match = re.search(r'<answer>\s*([12345ABCDabcd])\s*</answer>', output_text)
         if match:
             raw_ans = match.group(1).upper()
@@ -638,17 +654,14 @@ def main():
                 
         print(f"[{index+1}/{len(df)}] {img_filename} -> Output: {ans}")
 
-        # CHANGED: Added 'id', 'image_name', and 'option' columns to match the sample_submission.csv
         results.append({
             'id': img_filename,
             'image_name': img_filename,
             'option': ans
         })
 
-    # 5. Save submission.csv in the current working directory
+    # 5. Save submission.csv in the current working directory (NOT test_dir)
     submission_df = pd.DataFrame(results)
-    
-    # Optional: Ensure column order exactly matches what is required
     submission_df = submission_df[['id', 'image_name', 'option']]
     submission_df.to_csv('submission.csv', index=False)
     
